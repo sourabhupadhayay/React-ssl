@@ -1,13 +1,17 @@
 pipeline {
   agent any
+
   environment {
     DOCKER_IMAGE = "react-nginx"
     DOCKER_TAG = "latest"
     DOMAIN = "dev.4xexch.com"
     EMAIL = "sourbhupadhayay@gmail.com"
     WEBROOT = "/usr/share/nginx/html"
+    ZONE_ID = "Z05874792AIIDGGJ4T4WU"
   }
+
   stages {
+
     stage('Checkout') {
       steps {
         git 'https://github.com/sourabhupadhayay/React-ssl.git'
@@ -29,33 +33,69 @@ pipeline {
       }
     }
 
+    stage('Update DNS') {
+      steps {
+        writeFile file: 'update-dns.sh', text: '''#!/bin/bash
+DOMAIN="dev.4xexch.com"
+ZONE_ID="Z05874792AIIDGGJ4T4WU"
+IP=$(curl -s http://checkip.amazonaws.com/)
+
+cat > record.json <<EOF
+{
+  "Comment": "Update record set",
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "$DOMAIN",
+      "Type": "A",
+      "TTL": 300,
+      "ResourceRecords": [{ "Value": "$IP" }]
+    }
+  }]
+}
+EOF
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id "$ZONE_ID" \
+  --change-batch file://record.json
+'''
+        sh 'chmod +x update-dns.sh'
+        sh './update-dns.sh'
+      }
+    }
+
+    stage('Wait for DNS Propagation') {
+      steps {
+        echo 'Waiting 30 seconds for DNS to propagate...'
+        sh 'sleep 30'
+      }
+    }
+
     stage('Run Temporary Nginx') {
       steps {
         sh '''
-      docker stop temp-nginx || true
-      docker rm temp-nginx || true
+          docker stop temp-nginx || true
+          docker rm temp-nginx || true
 
-      # Free up port 80
-      CONTAINER_USING_PORT=$(docker ps --filter "publish=80" --format "{{.ID}}")
-      if [ -n "$CONTAINER_USING_PORT" ]; then
-        docker stop "$CONTAINER_USING_PORT"
-      fi
+          CONTAINER_USING_PORT=$(docker ps --filter "publish=80" --format "{{.ID}}")
+          if [ -n "$CONTAINER_USING_PORT" ]; then
+            docker stop "$CONTAINER_USING_PORT"
+          fi
 
-      docker run -d --name temp-nginx -p 80:80 \
-        -v /usr/share/nginx/html:/usr/share/nginx/html \
-        nginx:alpine
-    '''
-  }
-}
+          docker run -d --name temp-nginx -p 80:80 \
+            -v /usr/share/nginx/html:/usr/share/nginx/html \
+            nginx:alpine
+        '''
+      }
+    }
 
-
-   stage('Run Certbot') {
-    steps {
-    writeFile file: 'certbot-setup.sh', text: '''#!/bin/bash
+    stage('Run Certbot') {
+      steps {
+        writeFile file: 'certbot-setup.sh', text: '''#!/bin/bash
 DOMAIN="dev.4xexch.com"
 EMAIL="sourbhupadhayay@gmail.com"
 
-# Stop containers that bind to port 80
+# Stop containers using port 80
 docker ps --filter "publish=80" --format "{{.ID}}" | xargs -r docker stop
 
 docker run --rm -p 80:80 \
@@ -64,12 +104,10 @@ docker run --rm -p 80:80 \
   certbot/certbot certonly --standalone \
   -d "$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive
 '''
-      sh 'chmod +x certbot-setup.sh'
-      sh './certbot-setup.sh'
-  }
-}
-
-
+        sh 'chmod +x certbot-setup.sh'
+        sh './certbot-setup.sh'
+      }
+    }
 
     stage('Stop Temporary Nginx') {
       steps {
@@ -91,12 +129,6 @@ docker run --rm -p 80:80 \
             -v /etc/letsencrypt/live/$DOMAIN/privkey.pem:/etc/nginx/ssl/privkey.pem:ro \
             $DOCKER_IMAGE:$DOCKER_TAG
         '''
-      }
-    }
-
-    stage('Update DNS') {
-      steps {
-        sh './update-dns.sh'
       }
     }
 
